@@ -1,0 +1,12 @@
+{
+  "name": "seoul-care-simulator",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "serve": "python serve.py",
+    "batch": "node batch/run.js --config batch/scenarios.example.json"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "visit_x_homecare",
+  "data": "data/districts.csv",
+  "days": 1825,
+  "reps": 30,
+  "scale": 100,
+  "seed": 2026,
+  "targets": ["강북구", "강서구", "중랑구", "구로구", "금천구"],
+  "params": {},
+  "policy": {
+    "outreach": 0,
+    "ltc_expand": 0,
+    "discharge_link": 0,
+    "priority_alone": 1,
+    "start_day": 0
+  },
+  "grid": {
+    "visit_teams": [0, 2, 4, 8],
+    "homecare_expand": [0, 30, 60]
+  }
+}

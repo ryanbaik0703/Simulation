@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>서울 돌봄 시뮬레이터</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <h1>서울 의료·돌봄 시뮬레이터</h1>
+      <span id="dataBadge" class="badge warn" hidden>임시 데이터</span>
+    </div>
+    <div class="clock"><span id="clockDate">—</span><span id="clockTime">—</span></div>
+    <div class="transport">
+      <button id="btnPlay" class="btn primary">▶ 재생</button>
+      <label>속도
+        <select id="speed">
+          <option value="3">1시간 / 0.3초</option>
+          <option value="12" selected>반나절 / 초</option>
+          <option value="48">2일 / 초</option>
+          <option value="168">1주 / 초</option>
+          <option value="720">1개월 / 초</option>
+        </select>
+      </label>
+      <button id="btnReset" class="btn">처음부터</button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="side">
+      <nav class="tabs" role="tablist">
+        <button class="tab active" data-tab="policy">정책</button>
+        <button class="tab" data-tab="params">파라미터</button>
+        <button class="tab" data-tab="data">데이터</button>
+      </nav>
+
+      <section class="pane active" id="pane-policy">
+        <p class="hint">값을 바꾸면 <b>정책 적용</b> 지도에 바로 반영됩니다. 정확한 비교는 “처음부터”로 다시 실행하세요.</p>
+        <div id="policyControls"></div>
+        <h3>대상 자치구</h3>
+        <div class="chip-actions">
+          <button class="btn sm" data-targets="all">전체</button>
+          <button class="btn sm" data-targets="none">해제</button>
+          <button class="btn sm" data-targets="candidates">복합취약 후보</button>
+        </div>
+        <div id="targetChips" class="chips"></div>
+        <h3>정책 연간 비용 (추정)</h3>
+        <div id="costBox" class="cost"></div>
+      </section>
+
+      <section class="pane" id="pane-params">
+        <p class="hint">모든 확률은 <b>75세·동거·비수급자</b> 기준 연간 확률이며, 개인 특성은 오즈비(OR)로 보정됩니다. <span class="tag assumed">가정</span> 표시는 문헌·데이터로 교체할 값입니다. 변경 후 “처음부터”를 누르세요.</p>
+        <div id="paramTable"></div>
+        <label class="row">에이전트 1명 = 실제
+          <select id="scale">
+            <option value="50">50명</option>
+            <option value="100" selected>100명</option>
+            <option value="200">200명</option>
+            <option value="500">500명</option>
+          </select>
+        </label>
+        <label class="row">난수 시드 <input id="seed" type="number" value="2026"></label>
+      </section>
+
+      <section class="pane" id="pane-data">
+        <p class="hint">자치구별 CSV를 올리면 그 데이터로 시뮬레이션합니다. 필수 열: <code>gu, pop65, alone, clinics, homecare_fac, ltc_fac, community_fac</code> · 선택: <code>pop75, alone_basic, entry_rate</code></p>
+        <div class="row">
+          <input id="csvFile" type="file" accept=".csv,text/csv">
+        </div>
+        <button id="btnTemplate" class="btn sm">현재 데이터 CSV로 내려받기</button>
+        <div id="dataStatus" class="hint"></div>
+        <div class="table-wrap"><table id="dataTable"></table></div>
+      </section>
+    </aside>
+
+    <main class="main">
+      <div class="map-toolbar">
+        <label>지도 색상
+          <select id="colorMode">
+            <option value="unmet">돌봄 미충족 비율 (돌봄필요 중)</option>
+            <option value="medgap">의료 공백 비율 (재가 노인 중)</option>
+            <option value="care">돌봄필요 비율</option>
+            <option value="opunmet">외래 수요 초과 비율</option>
+            <option value="access">의료 접근성 (2SFCA, 구별)</option>
+            <option value="access_dong">의료 접근성 (2SFCA, 동별)</option>
+          </select>
+        </label>
+        <div class="legend">
+          <span class="ramp" id="rampLegend"></span>
+          <span class="legend-items">
+            <span><i style="background:#8a9099"></i>건강</span>
+            <span><i style="background:#199e70"></i>허약</span>
+            <span><i style="background:#3987e5"></i>돌봄 받음</span>
+            <span><i style="background:#e34948"></i>돌봄 미충족</span>
+            <span><i style="background:#d55181"></i>입원</span>
+            <span><i style="background:#9085e9"></i>시설</span>
+            <span><i class="cross"></i>방문진료팀</span>
+            <span><i class="amb"></i>응급 이송</span>
+          </span>
+        </div>
+      </div>
+      <div class="maps">
+        <figure class="map-card">
+          <figcaption><i style="background:var(--series-1)"></i>정책 없음 (현 추세 유지)</figcaption>
+          <canvas id="mapBase"></canvas>
+        </figure>
+        <figure class="map-card">
+          <figcaption><i style="background:var(--series-2)"></i>정책 적용</figcaption>
+          <canvas id="mapPolicy"></canvas>
+        </figure>
+        <div id="mapTip" class="map-tip" hidden></div>
+      </div>
+
+      <div class="kpis" id="kpis"></div>
+
+      <div class="charts">
+        <div id="chUnmet"></div>
+        <div id="chMedGap"></div>
+        <div id="chAdm"></div>
+        <div id="chDeaths"></div>
+      </div>
+
+      <section class="mc">
+        <div class="mc-head">
+          <h2>몬테카를로 검증</h2>
+          <p class="hint">같은 조건을 여러 번 반복 실행해 정책 효과의 평균과 95% 신뢰구간을 계산합니다. 반복마다 난수가 달라지며, 각 반복 안에서는 두 시나리오가 같은 난수를 공유합니다(공통난수법).</p>
+        </div>
+        <div class="mc-controls">
+          <label>반복 <input id="mcReps" type="number" value="20" min="2" max="200"></label>
+          <label>기간(일) <input id="mcDays" type="number" value="365" min="30" max="3650"></label>
+          <label>에이전트 1명 =
+            <select id="mcScale"><option value="200">200명</option><option value="500" selected>500명</option><option value="100">100명</option></select>
+          </label>
+          <button id="btnMC" class="btn primary">실행</button>
+          <span id="mcProgress" class="hint"></span>
+        </div>
+        <div class="table-wrap"><table id="mcTable"></table></div>
+      </section>
+    </main>
+  </div>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
