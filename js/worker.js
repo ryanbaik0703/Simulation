@@ -3,12 +3,12 @@ import { runPair } from './engine.js';
 import { meanCI } from './stats.js';
 
 self.onmessage = (e) => {
-  const { districts, params, basePolicy, policy, reps, days, scale, seed } = e.data;
+  const { districts, params, basePolicy, policy, reps, days, scale, seed, projection } = e.data;
   // postMessage는 Set을 배열로 보내므로 복원
   for (const p of [policy, basePolicy]) if (p.targets) p.targets = new Set(p.targets);
   const runs = [];
   for (let r = 0; r < reps; r++) {
-    runs.push(runPair(districts, params, basePolicy, policy, { seed: seed + r * 7919, scale, days, years: Math.ceil(days / 365) }));
+    runs.push(runPair(districts, params, basePolicy, policy, { seed: seed + r * 7919, scale, days, years: Math.ceil(days / 365), projection }));
     self.postMessage({ type: 'progress', done: r + 1, reps });
   }
   const keys = Object.keys(runs[0].base);

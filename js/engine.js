@@ -13,6 +13,9 @@ export const S = { ROBUST: 0, FRAIL: 1, CARE: 2, HOSP: 3, INST: 4, DEAD: 5 };
 export const STATE_LABELS = ['건강', '허약', '돌봄필요', '입원', '시설', '사망'];
 
 const NEVER = -100000;
+const INV365 = 1 / 365;
+// 구별 5세 연령대 열 (등록인구). 모두 있으면 초기 나이를 이 분포에서 뽑는다.
+const AGE_BANDS = [['a65', 65], ['a70', 70], ['a75', 75], ['a80', 80], ['a85', 85], ['a90', 90], ['a95', 95]];
 
 // 외래 공급을 "의원 1곳 환산 수"로: 유형별 기관 수 × 가중치.
 // 우선순위: 2SFCA 유효 기관 수(*_eff, 구 경계를 넘는 이용을 거리로 반영) → 구 안의 유형별 수(*_n) → clinics 합계
@@ -32,7 +35,10 @@ export class Simulation {
    *                            homecare_fac, ltc_fac, ltc_capacity?, ltc_residents?, community_fac, entry_rate?}]
    * @param {object} params    PARAM 값
    * @param {object} policy    정책 레버 값
-   * @param {object} opt       { seed, scale, years }
+   * @param {object} opt       { seed, scale, years, projection? }
+   *   projection: buildProjection() 결과. 있으면 65세 신규 진입을 추계인구로 계산하고(매일 분산),
+   *   나이를 매일 1/365씩 올린다. 없으면 기존 방식(entry_rate, 연 1회)을 그대로 쓴다.
+   *   districts에 a65~a95(5세 연령대 인구)와 rec65(장기요양 인정자)가 있으면 초기 상태를 실측에 맞춘다.
    */
   constructor(districts, params, policy, opt) {
     this.d = districts;
@@ -43,6 +49,7 @@ export class Simulation {
     this.scale = opt.scale;
     this.day = 0;
     this.hour = 0;
+    this.proj = opt.projection ?? null;
     this.history = [];
     this.cum = { admissions: 0, deaths: 0, instEntries: 0, unmetCareDays: 0, medGapDays: 0, homeVisits: 0 };
     this.targetMask = new Uint8Array(this.G);
@@ -77,8 +84,9 @@ export class Simulation {
     const sc = this.scale;
     let n0 = 0;
     const counts = this.d.map((r) => { const c = Math.round(r.pop65 / sc); n0 += c; return c; });
-    const growth = this.d.reduce((s, r) => s + (r.pop65 * (r.entry_rate ?? this.p.entry_rate)) / sc, 0);
-    const cap = Math.ceil(n0 + growth * (years + 1) + 100);
+    let growth = 0;
+    for (let k = 0; k <= years; k++) for (let g = 0; g < this.G; g++) growth += this._entrantsYear(g, k) / sc;
+    const cap = Math.ceil(n0 + growth * 1.02 + 300);
     this.cap = cap;
     this.n = 0;
     this.gu = new Uint8Array(cap);
@@ -94,23 +102,103 @@ export class Simulation {
     this.unmetCare = new Uint16Array(cap);  // 연속 돌봄 미충족 일수
     this.visit = new Uint8Array(cap);       // 오늘 의료이용: 0 없음, 1 외래, 2 방문진료, 3 외래 실패
     this.event = new Uint8Array(cap);       // 오늘 사건: 0 없음, 1 입원, 2 사망, 3 시설입소, 4 퇴원
+    // 구별 돌봄필요 발생 보정 (로그오즈). 실측 인정자가 있으면 ln(구 보정비), 없으면 0.
+    // 초기 인원만 맞추면 시간이 지나며 모든 구가 서울 평균으로 수렴하므로, 같은 비율을 발생률에도 적용한다.
+    this.guLo = new Float64Array(this.G);
 
     for (let g = 0; g < this.G; g++) {
       const r = this.d[g];
       const share75 = r.pop75 ? r.pop75 / r.pop65 : 0.55;
       const aloneRate = r.alone / r.pop65;
       const poorAlone = r.alone_basic != null ? r.alone_basic / Math.max(1, r.alone) : 0.25;
+      const bands = this._ageBands(r);       // 실측 연령 구조 (없으면 null → 기존 방식)
+      const rec = this._recInit(g, bands);   // 실측 장기요양 인정자 (없으면 null → 기존 방식)
       const first = this.n;
       for (let k = 0; k < counts[g]; k++) {
         const i = this.n++;
         this.gu[i] = g;
-        this.age[i] = rng() < share75 ? 75 + Math.min(30, -Math.log(1 - rng()) * 7) : 65 + rng() * 10;
+        this.age[i] = bands ? this._sampleAge(bands, rng)
+          : rng() < share75 ? 75 + Math.min(30, -Math.log(1 - rng()) * 7) : 65 + rng() * 10;
         this.alone[i] = rng() < aloneRate ? 1 : 0;
         this.poor[i] = rng() < (this.alone[i] ? poorAlone : 0.05) ? 1 : 0;
-        this.state[i] = this._initialState(this.age[i], rng());
+        this.state[i] = rec ? S.ROBUST : this._initialState(this.age[i], rng());
         this.lastMed[i] = -Math.floor(rng() * 60);
       }
-      if (r.ltc_residents != null) this._matchInstitution(g, first, r.ltc_residents / sc, rng);
+      if (rec) {
+        // 인정자 수·시설 현원을 한꺼번에 실측에 맞춤
+        this._assignRecognized(first, this.n, rec, g, rng);
+        this.guLo[g] = Math.log(Math.max(0.2, Math.min(5, rec.ratio)));
+      } else if (r.ltc_residents != null) {
+        this._matchInstitution(g, first, r.ltc_residents / sc, rng);
+      }
+    }
+  }
+
+  // ---- 실측 기반 초기화 (해당 열이 CSV에 있을 때만 사용) ----------------------
+  // 5세 연령대 누적분포. 열이 하나라도 없으면 null.
+  _ageBands(r) {
+    if (AGE_BANDS.some(([k]) => r[k] == null)) return null;
+    const tot = AGE_BANDS.reduce((s, [k]) => s + r[k], 0);
+    if (!(tot > 0)) return null;
+    let c = 0;
+    return AGE_BANDS.map(([k, lo]) => { c += r[k] / tot; return [c, lo]; });
+  }
+
+  _sampleAge(bands, rng) {
+    const x = rng();
+    let lo = 95;
+    for (const [c, a] of bands) if (x < c) { lo = a; break; }
+    return lo < 95 ? lo + rng() * 5 : 95 + Math.min(12, -Math.log(1 - rng()) * 2.5);
+  }
+
+  // 구별 장기요양 인정자(rec65)를 재현하기 위한 값.
+  //   P(인정 | 연령대, 구) = 서울 연령대별 인정률 × 구 보정비
+  //   구 보정비 = 구 실제 인정자 ÷ (구 연령구조에 서울 인정률을 적용한 기대 인정자)
+  _recInit(g, bands) {
+    const r = this.d[g], p = this.p;
+    const rates = [p.rec_rate_65, p.rec_rate_70, p.rec_rate_75, p.rec_rate_80, p.rec_rate_85];
+    if (!bands || r.rec65 == null || rates.some((v) => v == null)) return null;
+    const pop = [r.a65, r.a70, r.a75, r.a80, r.a85 + r.a90 + r.a95];
+    const expected = pop.reduce((s, n, k) => s + n * rates[k], 0);
+    return { rates, ratio: expected > 0 ? r.rec65 / expected : 1 };
+  }
+
+  // 구 g의 에이전트[start, end) 중 인정자를 뽑아 초기 상태를 정한다.
+  //  - 인원: 구별 실제 인정자 수(rec65)에 맞춤 (에이전트 단위로 확률적 반올림)
+  //  - 누구를: 연령대별 인정률에 비례하는 확률로 계통추출 → 연령 분포도 실측을 따름
+  //  - 그중 시설 입소: 구별 시설 현원(ltc_residents)에 맞춤, 나머지는 재가 돌봄필요
+  //  - 인정자가 아닌 사람의 허약 비율은 실측이 없어 기존 가정(75세 28%)을 유지
+  _assignRecognized(start, end, rec, g, rng) {
+    const r = this.d[g], sc = this.scale, n = end - start;
+    if (n <= 0) return;
+    const band = (age) => Math.min(4, Math.max(0, Math.floor((age - 65) / 5)));
+    let tot = 0;
+    for (let i = start; i < end; i++) tot += rec.rates[band(this.age[i])];
+    const K = Math.min(n, stochRound(r.rec65 / sc, rng()));
+    const picked = [];
+    if (K > 0 && tot > 0) {
+      const step = tot / K;
+      let next = rng() * step, acc = 0;
+      for (let i = start; i < end; i++) {
+        acc += rec.rates[band(this.age[i])];
+        if (acc > next) { picked.push(i); next += step; }
+      }
+    }
+    const isRec = new Uint8Array(n);
+    for (const i of picked) isRec[i - start] = 1;
+    // 시설 입소자: 인정자 중 무작위
+    for (let k = picked.length - 1; k > 0; k--) {
+      const j = Math.floor(rng() * (k + 1));
+      const t = picked[k]; picked[k] = picked[j]; picked[j] = t;
+    }
+    const instTarget = r.ltc_residents != null ? r.ltc_residents / sc : picked.length * 0.1;
+    const nInst = Math.min(picked.length, stochRound(instTarget, rng()));
+    picked.forEach((i, k) => { this.state[i] = k < nInst ? S.INST : S.CARE; });
+    for (let i = start; i < end; i++) {
+      if (isRec[i - start]) continue;
+      const pRec = Math.min(0.95, rec.rates[band(this.age[i])] * rec.ratio);
+      const pFrail = Math.min(1, applyLogOdds(0.28, Math.log(1.09) * (this.age[i] - 75) * 0.6) / Math.max(0.05, 1 - pRec));
+      this.state[i] = rng() < pFrail ? S.FRAIL : S.ROBUST;
     }
   }
 
@@ -140,23 +228,45 @@ export class Simulation {
     return S.ROBUST;
   }
 
+  // 시작 후 k번째 해(0부터)의 구별 65세 신규 진입 인원 (실제 인구 단위)
+  _entrantsYear(g, k) {
+    const r = this.d[g];
+    const e = this.proj?.entrants?.[r.gu];
+    if (e && e.length) return e[Math.min(Math.max(0, k), e.length - 1)];
+    return r.pop65 * (r.entry_rate ?? this.p.entry_rate);
+  }
+
+  _spawnEntrant(g, aloneRate, exact65) {
+    const i = this.n++;
+    this.gu[i] = g;
+    this.age[i] = exact65 ? 65 : 65 + u(this.seed, i, 0, 20);
+    this.alone[i] = u(this.seed, i, 0, 21) < aloneRate ? 1 : 0;
+    this.poor[i] = u(this.seed, i, 0, 22) < 0.05 ? 1 : 0;
+    this.state[i] = u(this.seed, i, 0, 23) < 0.12 ? S.FRAIL : S.ROBUST;
+    this.lastMed[i] = this.day;
+    this.discharge[i] = NEVER;
+  }
+
+  // 기존 방식: 1년에 한 번 한꺼번에 진입
   _addEntrants() {
-    const sc = this.scale;
+    const sc = this.scale, year = Math.floor(this.day / 365) - 1;
     for (let g = 0; g < this.G; g++) {
       const r = this.d[g];
-      const expected = (r.pop65 * (r.entry_rate ?? this.p.entry_rate)) / sc;
+      const expected = this._entrantsYear(g, year) / sc;
       const k = stochRound(expected, u(this.seed, g, this.day, 12));
       const aloneRate = (r.alone / r.pop65) * 0.6; // 신규 진입자는 독거 비율이 낮음 (가정)
-      for (let j = 0; j < k && this.n < this.cap; j++) {
-        const i = this.n++;
-        this.gu[i] = g;
-        this.age[i] = 65 + u(this.seed, i, 0, 20);
-        this.alone[i] = u(this.seed, i, 0, 21) < aloneRate ? 1 : 0;
-        this.poor[i] = u(this.seed, i, 0, 22) < 0.05 ? 1 : 0;
-        this.state[i] = u(this.seed, i, 0, 23) < 0.12 ? S.FRAIL : S.ROBUST;
-        this.lastMed[i] = this.day;
-        this.discharge[i] = NEVER;
-      }
+      for (let j = 0; j < k && this.n < this.cap; j++) this._spawnEntrant(g, aloneRate, false);
+    }
+  }
+
+  // 추계인구 사용 시: 그 해 65세 도달 인원을 365일에 나눠 매일 진입
+  _addEntrantsDaily() {
+    const sc = this.scale, year = Math.floor(this.day / 365);
+    for (let g = 0; g < this.G; g++) {
+      const r = this.d[g];
+      const k = stochRound((this._entrantsYear(g, year) / sc) * INV365, u(this.seed, g, this.day, 12));
+      const aloneRate = (r.alone / r.pop65) * 0.6;
+      for (let j = 0; j < k && this.n < this.cap; j++) this._spawnEntrant(g, aloneRate, true);
     }
   }
 
@@ -211,10 +321,13 @@ export class Simulation {
 
   _daily() {
     const day = this.day, seed = this.seed, G = this.G, p = this.p, pol = this.pol;
-    if (day > 0 && day % 365 === 0) {
+    const cont = !!this.proj;            // 추계인구 사용: 나이·진입을 매일 반영
+    const aging = cont && day > 0;
+    if (!cont && day > 0 && day % 365 === 0) {
       for (let i = 0; i < this.n; i++) if (this.state[i] !== S.DEAD) this.age[i] += 1;
+      this._addEntrants();
     }
-    if (day > 0 && day % 365 === 0) this._addEntrants();
+    if (aging) this._addEntrantsDaily();
     const year = Math.floor(day / 365);
     const cap = this._capacities();
     this.cap_ = cap;
@@ -231,6 +344,7 @@ export class Simulation {
       this.visit[i] = 0;
       this.event[i] = 0;
       if (s === S.DEAD) continue;
+      if (aging) this.age[i] += INV365;
       const g = this.gu[i];
       if (s === S.INST) instCount[g]++;
       if (s !== S.CARE) this.unmetCare[i] = 0;
@@ -298,7 +412,9 @@ export class Simulation {
       m.opDemand += od.length;
       m.opUnmet += guOpUnmet[g];
 
-      freeBeds[g] = Math.max(0, Math.floor(cap.bed[g]) - instCount[g]);
+      // 실측 정원은 구별로 에이전트 몇 명 수준이라, 내림 대신 확률적 반올림으로 기댓값을 보존
+      const bedCap = this.d[g].ltc_capacity != null ? stochRound(cap.bed[g], u(seed, g, day, 34)) : Math.floor(cap.bed[g]);
+      freeBeds[g] = Math.max(0, bedCap - instCount[g]);
     }
 
     // 지역사회 프로그램 참여 확률 (구별, 연 단위로 고정)
@@ -318,7 +434,8 @@ export class Simulation {
         if (--this.hospLeft[i] <= 0) {
           let back = this.prevState[i];
           const linked = pol.discharge_link && this.policyActive(g);
-          const pDown = p.p_downgrade_after_hosp * (linked ? pol.eff_discharge_downgrade : 1);
+          let pDown = p.p_downgrade_after_hosp * (linked ? pol.eff_discharge_downgrade : 1);
+          if (back === S.FRAIL && this.guLo[g] !== 0) pDown = applyLogOdds(pDown, this.guLo[g]); // 허약 → 돌봄필요에만 구 보정
           if (u(seed, i, day, 6) < pDown && back < S.CARE) back++;
           this.state[i] = back;
           this.discharge[i] = day;
@@ -370,7 +487,7 @@ export class Simulation {
       if (s === S.ROBUST) {
         if (r < applyLogOdds(pd.rf, loRisk)) this.state[i] = S.FRAIL;
       } else if (s === S.FRAIL) {
-        const pUp = applyLogOdds(pd.fc, loRisk);
+        const pUp = applyLogOdds(pd.fc, loRisk + this.guLo[g]);
         const pDown = applyLogOdds(pd.fr, -loRisk);
         if (r < pUp) this.state[i] = S.CARE;
         else if (r < pUp + pDown) this.state[i] = S.ROBUST;

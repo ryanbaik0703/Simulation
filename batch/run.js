@@ -8,13 +8,14 @@
 //   raw.csv       반복 1회 = 1행 (R/Python으로 추가 분석용)
 //   summary.json  위 내용 + 설정
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { cpus } from 'node:os';
 import { dirname, resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runOne } from '../js/engine.js';
 import { defaultParams, defaultPolicy, nullPolicy } from '../js/params.js';
-import { parseCSV, toCSV } from '../js/csv.js';
+import { parseCSV, parseTable, toCSV } from '../js/csv.js';
+import { buildProjection } from '../js/projection.js';
 import { meanCI } from '../js/stats.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -23,11 +24,11 @@ if (isMainThread) {
   main();
 } else {
   // ---- 워커: 작업을 받아 실행하고 결과 반환 ----
-  const { districts } = workerData;
+  const { districts, projection } = workerData;
   parentPort.on('message', (task) => {
     if (task === null) { process.exit(0); }
     const policy = { ...task.policy, targets: task.policy.targets ? new Set(task.policy.targets) : null };
-    const r = runOne(districts, task.params, policy, { seed: task.seed, scale: task.scale, days: task.days, years: Math.ceil(task.days / 365) + 1 });
+    const r = runOne(districts, task.params, policy, { seed: task.seed, scale: task.scale, days: task.days, years: Math.ceil(task.days / 365) + 1, projection });
     parentPort.postMessage({ id: task.id, result: r });
   });
 }
@@ -59,6 +60,9 @@ async function main() {
   const outDir = resolve(args.out ?? join(ROOT, 'results', `${name}_${stamp()}`));
 
   const districts = parseCSV(readFileSync(resolve(ROOT, cfg.data ?? 'data/districts.csv'), 'utf8'));
+  // 추계인구 파일이 있으면 65세 진입에 사용 (없으면 기존 고정 진입률)
+  const projPath = resolve(ROOT, cfg.projection ?? 'data/projection.csv');
+  const projection = existsSync(projPath) ? buildProjection(parseTable(readFileSync(projPath, 'utf8')), districts) : null;
   const params = { ...defaultParams(), ...(cfg.params ?? {}) };
   const allGu = districts.map((r) => r.gu);
   const targets = cfg.targets === 'all' || !cfg.targets ? allGu : cfg.targets;
@@ -87,7 +91,7 @@ async function main() {
   const workers = [];
   await new Promise((resolveAll, reject) => {
     for (let w = 0; w < Math.min(threads, tasks.length); w++) {
-      const worker = new Worker(fileURLToPath(import.meta.url), { workerData: { districts } });
+      const worker = new Worker(fileURLToPath(import.meta.url), { workerData: { districts, projection } });
       workers.push(worker);
       const feed = () => {
         if (next < tasks.length) {

@@ -173,3 +173,9 @@ th { color: var(--text-2); font-weight: 600; }
   .maps, .charts { grid-template-columns: 1fr; }
   .transport { margin-left: 0; }
 }
+
+/* 툴팁: 정책 적용 상태 한 줄 */
+.map-tip .tip-status { margin: 2px 0 4px; font-size: 11px; color: var(--text-muted); }
+/* 파라미터 근거 표시: 실측 / 보정 */
+.tag.data { background: color-mix(in srgb, var(--good) 18%, transparent); color: var(--good); }
+.tag.calibrated { background: color-mix(in srgb, var(--series-1) 18%, transparent); color: var(--series-1); }

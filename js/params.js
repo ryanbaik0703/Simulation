@@ -1,5 +1,5 @@
 // 모델 파라미터 정의.
-// status: 'assumed' = 임시 가정값(문헌·데이터로 교체 필요), 'data' = 데이터에서 산출
+// status: 'assumed' = 임시 가정값(문헌·데이터로 교체 필요), 'data' = 데이터에서 산출, 'calibrated' = 실측 목표에 맞춰 보정
 // 확률은 별도 표기가 없으면 "75세, 동거, 비수급자" 기준의 연간 확률이며,
 // 개인 특성은 로지스틱 모형의 오즈비(OR)로 보정한다.
 
@@ -8,8 +8,8 @@ export const PARAM_DEFS = [
   { key: 'p_robust_frail', group: '건강상태 전이', label: '건강 → 허약', unit: '연간 확률', value: 0.07, status: 'assumed',
     note: '노인 노쇠 발생률 문헌값으로 교체 (예: 한국노인노쇠코호트)' },
   { key: 'p_frail_robust', group: '건강상태 전이', label: '허약 → 건강 (회복)', unit: '연간 확률', value: 0.15, status: 'assumed', note: '' },
-  { key: 'p_frail_care', group: '건강상태 전이', label: '허약 → 돌봄필요', unit: '연간 확률', value: 0.07, status: 'assumed',
-    note: '장기요양 신규 인정률(건보공단 장기요양통계)로 보정' },
+  { key: 'p_frail_care', group: '건강상태 전이', label: '허약 → 돌봄필요', unit: '연간 확률', value: 0.02, status: 'calibrated',
+    note: '인정자 수가 "연령별 인정률 고정 × 추계인구" 전망을 5년간 ±3% 안에서 따르도록 보정 (기존 가정 0.07)' },
   { key: 'p_care_frail', group: '건강상태 전이', label: '돌봄필요 → 허약 (호전)', unit: '연간 확률', value: 0.05, status: 'assumed', note: '' },
   { key: 'p_care_inst', group: '건강상태 전이', label: '돌봄필요 → 시설입소', unit: '연간 확률', value: 0.05, status: 'assumed',
     note: '시설급여 이용 전환율로 보정' },
@@ -20,7 +20,8 @@ export const PARAM_DEFS = [
   { key: 'p_hosp_care', group: '입원', label: '입원 (돌봄필요)', unit: '연간 확률', value: 0.30, status: 'assumed', note: '' },
   { key: 'los_mean', group: '입원', label: '평균 재원일수', unit: '일', value: 11, status: 'assumed',
     note: '건강보험통계 65세 이상 평균 재원일수' },
-  { key: 'p_downgrade_after_hosp', group: '입원', label: '퇴원 시 상태 악화', unit: '확률', value: 0.25, status: 'assumed', note: '' },
+  { key: 'p_downgrade_after_hosp', group: '입원', label: '퇴원 시 상태 악화', unit: '확률', value: 0.20, status: 'calibrated',
+    note: '위 인정자 전망에 함께 맞춘 값 (기존 가정 0.25)' },
   { key: 'readmit_window', group: '입원', label: '재입원 고위험 기간', unit: '일', value: 30, status: 'assumed', note: '' },
   { key: 'or_readmit', group: '입원', label: '퇴원 직후 재입원 OR', unit: 'OR', value: 1.8, status: 'assumed', note: '' },
 
@@ -33,7 +34,8 @@ export const PARAM_DEFS = [
   { key: 'p_death_per_stay', group: '사망', label: '입원 1회당 사망', unit: '확률', value: 0.03, status: 'assumed', note: '' },
 
   // ---- 개인 위험요인 (로지스틱 오즈비) ----
-  { key: 'or_age', group: '위험요인 (OR)', label: '나이 1세 증가', unit: 'OR', value: 1.07, status: 'assumed', note: '진행·사망에 적용' },
+  { key: 'or_age', group: '위험요인 (OR)', label: '나이 1세 증가', unit: 'OR', value: 1.10, status: 'calibrated',
+    note: '진행·사망에 적용. 65세 이상 인구가 추계인구 경로를 5년간 ±1% 안에서 따르도록 보정 (기존 가정 1.07)' },
   { key: 'or_alone', group: '위험요인 (OR)', label: '독거', unit: 'OR', value: 1.2, status: 'assumed', note: '건강 악화에 적용' },
   { key: 'or_isolated', group: '위험요인 (OR)', label: '사회적 고립 (독거+프로그램 미참여)', unit: 'OR', value: 1.35, status: 'assumed', note: '' },
   { key: 'or_poor', group: '위험요인 (OR)', label: '기초수급', unit: 'OR', value: 1.3, status: 'assumed', note: '악화·입원에 적용' },
@@ -72,9 +74,18 @@ export const PARAM_DEFS = [
     note: '데이터에 ltc_capacity(구별 정원)가 있으면 이 값 대신 그것을 씀' },
   { key: 'community_members', group: '의료·돌봄 용량', label: '지역사회시설 1곳 참여자', unit: '명', value: 35, status: 'assumed', note: '' },
 
+  // ---- 장기요양 인정률 (실측) : CSV에 a65~a95, rec65 열이 있을 때 초기 상태에 사용 ----
+  { key: 'rec_rate_65', group: '장기요양 인정률 (실측)', label: '65~69세 인정률', unit: '비율', value: 0.0152, status: 'data',
+    note: '건보공단 등급판정 현황(2026.8.31) 1~5등급+인지지원 ÷ 등록인구(2026 2분기), 서울' },
+  { key: 'rec_rate_70', group: '장기요양 인정률 (실측)', label: '70~74세 인정률', unit: '비율', value: 0.0312, status: 'data', note: '' },
+  { key: 'rec_rate_75', group: '장기요양 인정률 (실측)', label: '75~79세 인정률', unit: '비율', value: 0.0771, status: 'data', note: '' },
+  { key: 'rec_rate_80', group: '장기요양 인정률 (실측)', label: '80~84세 인정률', unit: '비율', value: 0.1843, status: 'data', note: '' },
+  { key: 'rec_rate_85', group: '장기요양 인정률 (실측)', label: '85세 이상 인정률', unit: '비율', value: 0.3364, status: 'data',
+    note: '구별 차이는 CSV의 rec65(구별 인정자 수)로 보정' },
+
   // ---- 인구 동태 ----
   { key: 'entry_rate', group: '인구 동태', label: '65세 신규 진입 (65세 이상 인구 대비)', unit: '연간 비율', value: 0.065, status: 'assumed',
-    note: '장래인구추계로 교체 (구별)' },
+    note: 'data/projection.csv(추계인구)가 있으면 이 값 대신 연도별·구별 65세 도달 인구를 사용' },
 ];
 
 export function defaultParams() {

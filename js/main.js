@@ -3,28 +3,32 @@ import { Simulation, S, clinicUnits } from './engine.js';
 import { PARAM_DEFS, POLICY_DEFS, EFFECT_DEFS, defaultParams, defaultPolicy, nullPolicy } from './params.js';
 import { MapView, rampColor, RAMP_STOPS } from './render.js';
 import { LineChart } from './chart.js';
-import { parseCSV, toCSV } from './csv.js';
+import { parseCSV, parseTable, toCSV } from './csv.js';
+import { buildProjection } from './projection.js';
 
 const $ = (id) => document.getElementById(id);
 const fmt = (v) => Math.round(v).toLocaleString('ko-KR');
-const START = new Date(2026, 0, 1);
+const START = new Date(2026, 6, 1); // 기준 시점: 등록인구 2026년 2분기 말 = 추계인구 2026년 연앙
 const CANDIDATES = ['강북구', '강서구', '중랑구', '구로구', '금천구'];
 
 const app = {
   districts: null, geo: null, params: defaultParams(), policy: defaultPolicy(),
   scale: 100, seed: 2026, sims: null, maps: null, playing: false, acc: 0, hover: -1,
-  placeholder: false,
+  placeholder: false, projRows: null, projection: null,
   dongGeo: null, dongAccess: null, hoverDong: -1, // 2SFCA 동별 접근성 (없으면 null)
 };
 app.policy.targets = new Set(CANDIDATES);
 
 // ---- 데이터 ----
 async function load() {
-  const [csv, geo] = await Promise.all([
+  const [csv, geo, proj] = await Promise.all([
     fetch('data/districts.csv').then((r) => r.text()),
     fetch('data/seoul_gu.geojson').then((r) => r.json()),
+    // 추계인구(구×연도). 없어도 실행되며, 그때는 기존 고정 진입률을 쓴다.
+    fetch('data/projection.csv').then((r) => (r.ok ? r.text() : null)).catch(() => null),
   ]);
   app.geo = geo;
+  app.projRows = proj ? parseTable(proj) : null;
   await loadDongAccess();
   setDistricts(parseCSV(csv), 'data/districts.csv');
 }
@@ -49,10 +53,19 @@ async function loadDongAccess() {
 
 function setDistricts(rows, source) {
   app.districts = rows;
+  app.projection = buildProjection(app.projRows, rows);
   app.placeholder = rows.some((r) => r.is_placeholder === 1);
   $('dataBadge').hidden = !app.placeholder;
+  // 실측으로 계산되는 부분 (해당 열이 모든 구에 있을 때)
+  const has = (k) => rows.every((r) => r[k] != null);
+  const real = [];
+  if (['a65', 'a70', 'a75', 'a80', 'a85', 'a90', 'a95'].every(has)) real.push('연령 구조');
+  if (has('rec65')) real.push('장기요양 인정자');
+  if (has('ltc_capacity')) real.push('요양시설 정원');
+  if (app.projection) real.push('추계인구(65세 진입)');
   $('dataStatus').innerHTML = `불러온 데이터: <b>${source}</b> · ${rows.length}개 구` +
-    (app.placeholder ? ' · <span class="tag assumed">임시값 포함</span>' : '');
+    (app.placeholder ? ' · <span class="tag assumed">임시값 포함</span>' : '') +
+    (real.length ? `<br>실측 반영: ${real.join(' · ')}. 재가돌봄 용량·정책 효과는 가정값입니다.` : '');
   renderDataTable();
   app.maps = [new MapView($('mapBase'), app.geo, rows), new MapView($('mapPolicy'), app.geo, rows)];
   if (app.dongGeo) app.maps.forEach((m) => m.setDongs(app.dongGeo, app.geo));
@@ -63,7 +76,7 @@ function setDistricts(rows, source) {
 
 // ---- 시뮬레이션 ----
 function reset() {
-  const opt = { seed: app.seed, scale: app.scale, years: 6 };
+  const opt = { seed: app.seed, scale: app.scale, years: 6, projection: app.projection };
   app.sims = [
     new Simulation(app.districts, app.params, nullPolicy(app.policy), opt),
     new Simulation(app.districts, app.params, app.policy, opt),
@@ -75,6 +88,7 @@ function reset() {
   updateCharts(true);
   updateKPIs();
   updateCost();
+  renderTip();
 }
 
 function applyPolicyLive() {
@@ -82,6 +96,7 @@ function applyPolicyLive() {
   app.sims[0].setPolicy(nullPolicy(app.policy));
   app.sims[1].setPolicy(app.policy);
   updateCost();
+  renderTip();
 }
 
 function advance(hours) {
@@ -95,6 +110,7 @@ function advance(hours) {
     app.sims.forEach((s, k) => app.maps[k].syncAgents(s));
     updateCharts();
     updateKPIs();
+    renderTip();
   }
 }
 
@@ -169,6 +185,16 @@ function showTip(e, k) {
   const mode = $('colorMode').value;
   if (mode === 'access_dong' && app.dongAccess) return showDongTip(e, k, rect, tip);
   if (g < 0) { tip.hidden = true; return; }
+  renderTip();
+  placeTip(e, tip);
+}
+
+// 구 툴팁 내용만 다시 그린다. 마우스가 멈춰 있어도 날짜가 바뀌면 advance()에서 호출된다.
+function renderTip() {
+  const g = app.hover;
+  if (g < 0 || !app.sims) return;
+  const mode = $('colorMode').value;
+  if (mode === 'access_dong' && app.dongAccess) return; // 동별 접근성 툴팁은 날짜와 무관
   const sc = app.scale;
   const rows = app.sims.map((s) => {
     const x = s.gu_;
@@ -181,9 +207,15 @@ function showTip(e, k) {
     access = `<p class="tip-access">의료 접근성 <b>${fmt1(a[g])}</b> · 낮은 순 ${rank}/${a.length}위<br>` +
       `<span class="unit">구 안의 기관 ${fmt(app.districts[g].clinics ?? 0)}곳</span></p>`;
   }
-  tip.innerHTML = `<b>${app.districts[g].gu}</b>${access}<table><tr><th></th><th>정책 없음</th><th>정책 적용</th></tr>` +
-    lab.map((l, j) => `<tr><td>${l}</td><td>${fmt(rows[0][j])}</td><td>${fmt(rows[1][j])}</td></tr>`).join('') + '</table>';
-  placeTip(e, tip);
+  const sim = app.sims[1];
+  const isTarget = app.policy.targets.has(app.districts[g].gu);
+  const status = !isTarget ? '정책 대상 구가 아님 → 두 시나리오가 같습니다'
+    : sim.day < app.policy.start_day ? `정책 시작 전 (${app.policy.start_day}일차부터 적용)`
+    : `정책 적용 중 (${sim.day - app.policy.start_day}일 경과)`;
+  const diff = (a, b) => { const d = b - a; return d === 0 ? '–' : `${d > 0 ? '+' : ''}${fmt(d)}`; };
+  $('mapTip').innerHTML = `<b>${app.districts[g].gu}</b> · ${sim.day}일차<div class="tip-status">${status}</div>${access}` +
+    `<table><tr><th></th><th>정책 없음</th><th>정책 적용</th><th>차이</th></tr>` +
+    lab.map((l, j) => `<tr><td>${l}</td><td>${fmt(rows[0][j])}</td><td>${fmt(rows[1][j])}</td><td>${diff(rows[0][j], rows[1][j])}</td></tr>`).join('') + '</table>';
 }
 
 function showDongTip(e, k, rect, tip) {
@@ -203,7 +235,7 @@ function placeTip(e, tip) {
   const box = document.querySelector('.maps').getBoundingClientRect();
   tip.hidden = false;
   let left = e.clientX - box.left + 14;
-  if (left + 260 > box.width) left = e.clientX - box.left - 270;
+  if (left + 300 > box.width) left = e.clientX - box.left - 310;
   tip.style.left = `${left}px`;
   tip.style.top = `${e.clientY - box.top + 14}px`;
 }
@@ -300,7 +332,7 @@ function renderParamTable() {
   for (const d of PARAM_DEFS) (groups[d.group] ??= []).push(d);
   groups['정책 효과·비용'] = EFFECT_DEFS.map((d) => ({ ...d, isPolicy: true }));
   $('paramTable').innerHTML = Object.entries(groups).map(([g, defs]) => `<div class="pgroup"><h4>${g}</h4>` +
-    defs.map((d) => `<div class="prow"><span>${d.label}${d.status === 'assumed' ? '<span class="tag assumed">가정</span>' : ''}<br><span class="unit">${d.unit}</span></span>
+    defs.map((d) => `<div class="prow"><span>${d.label}${d.status === 'assumed' ? '<span class="tag assumed">가정</span>' : d.status === 'calibrated' ? '<span class="tag calibrated">보정</span>' : d.status === 'data' ? '<span class="tag data">실측</span>' : ''}<br><span class="unit">${d.unit}</span></span>
       <input type="number" step="any" data-key="${d.key}" data-policy="${d.isPolicy ? 1 : 0}" value="${d.isPolicy ? app.policy[d.key] : app.params[d.key]}">
       ${d.note ? `<span class="note">${d.note}</span>` : ''}</div>`).join('') + '</div>').join('');
   $('paramTable').querySelectorAll('input').forEach((el) => el.addEventListener('change', () => {
@@ -392,7 +424,7 @@ function runMonteCarlo() {
   const policy = { ...app.policy, targets: [...app.policy.targets] };
   worker.postMessage({
     districts: app.districts, params: app.params, basePolicy: { ...nullPolicy(app.policy), targets: policy.targets },
-    policy, reps, days, scale, seed: app.seed,
+    policy, reps, days, scale, seed: app.seed, projection: app.projection,
   });
 }
 

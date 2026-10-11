@@ -205,6 +205,21 @@ def main():
     else:
         print('  ! data/seoul_dong.geojson 이 없어 2SFCA를 건너뜁니다 (구 안의 기관 수만 사용)')
 
+    # 추가 실측 열 (5세 연령대 인구, 장기요양 인정자, 주야간보호 정원 등).
+    # data/districts_extra.csv 가 있으면 구 이름으로 합친다 → 이 스크립트를 다시 돌려도 열이 유지된다.
+    extra_path = os.path.join(DATA, 'districts_extra.csv')
+    if os.path.exists(extra_path):
+        with io.open(extra_path, encoding='utf-8-sig') as f:
+            extra = {r['gu']: r for r in csv.DictReader(f)}
+        miss = [row['gu'] for row in rows if row['gu'] not in extra]
+        if miss:
+            sys.exit('districts_extra.csv: 자치구가 빠져 있습니다 → {}'.format(', '.join(miss)))
+        for row in rows:
+            for k, v in extra[row['gu']].items():
+                if k != 'gu' and v != '':
+                    row[k] = float(v) if '.' in v else int(v)
+        print('  추가 열 합침: data/districts_extra.csv ({})'.format(', '.join(k for k in next(iter(extra.values())) if k != 'gu')))
+
     if os.path.exists(OUT):
         with io.open(OUT, encoding='utf-8-sig') as f:
             if 'is_placeholder' in f.readline():
